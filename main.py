@@ -1,4 +1,6 @@
 from HTMLParser import HTMLParser
+from Queue import Queue, Empty
+from threading import Thread
 import requests
 
 __author__ = 'crystal'
@@ -29,11 +31,11 @@ class RecipeParser(HTMLParser):
         HTMLParser.__init__(self)
         self.ok_recipe_link = False
         self.recipe_links = []
-        self.ok_preptime=False
-        self.ok_servings=False
-        self.ok_difficulty=False
-        self.ok_directions=False
-        self.ok_heading=False
+        self.ok_preptime = False
+        self.ok_servings = False
+        self.ok_difficulty = False
+        self.ok_directions = False
+        self.ok_heading = False
 
     def __getattr__(self, item):
         return ''
@@ -42,7 +44,7 @@ class RecipeParser(HTMLParser):
         tag = tag.lower()
         attrs = dict((name.lower(), value) for name, value in attrs)
         if 'class' not in attrs.keys():
-            attrs['class']=''
+            attrs['class'] = ''
 
         if tag == 'h1' and 'title' in attrs['class'].split():
             self.ok_heading = True
@@ -70,26 +72,26 @@ class RecipeParser(HTMLParser):
 
         # first nested span
         if tag == 'span' and self.ok_preptime:
-            self.ok_preptime=False
-            self.fetch_data_to_field=None
+            self.ok_preptime = False
+            self.fetch_data_to_field = None
 
     def handle_endtag(self, tag):
         tag = tag.lower()
         if tag == 'h1' and self.ok_heading:
             self.ok_heading = False
-            self.fetch_data_to_field=None
+            self.fetch_data_to_field = None
 
         if tag == 'span' and self.ok_servings:
-            self.ok_servings=False
-            self.fetch_data_to_field=None
+            self.ok_servings = False
+            self.fetch_data_to_field = None
 
         if tag == 'ol' and self.ok_directions:
-            self.ok_directions=False
-            self.fetch_data_to_field=None
+            self.ok_directions = False
+            self.fetch_data_to_field = None
 
         if tag == 'div' and self.ok_difficulty and self.fetch_data_to_field:
-            self.ok_difficulty=False
-            self.fetch_data_to_field=None
+            self.ok_difficulty = False
+            self.fetch_data_to_field = None
 
 
     def handle_data(self, data):
@@ -112,6 +114,7 @@ def get_recipe_list():
         json = resp.json()
         if not json['status']:
             break
+
         parser = RecipesListParser()
         parser.feed(json['display'])
         if first_url == parser.recipe_links[:1]:
@@ -121,28 +124,49 @@ def get_recipe_list():
             yield url
 
 
-def parse_recipe_by_url(recipe_url):
-    new_url = 'http://www.foodrepublic.com/%s' % recipe_url
-    resp = requests.get(new_url)
-    if resp.status_code != requests.codes.ok:
-        raise Exception('Hell! got %s', resp.text)
-    parser = RecipeParser()
-    parser.feed(resp.text)
-    print("Name:{0.name}\n"
-          "Servings:{0.servings}\n"
-          "Directions:{0.directions}\n"
-          "LevelofDifficulty:{0.difficulty}\n"
-          "PrepTime:{0.preptime}\n".format(parser))
+def parse_recipe_by_url(input_queue, output_queue):
+    while True:
+        recipe_url = input_queue.get()
+        new_url = 'http://www.foodrepublic.com/%s' % recipe_url
+        resp = requests.get(new_url)
+        if resp.status_code != requests.codes.ok:
+            raise Exception('Hell! got %s', resp.text)
+        parser = RecipeParser()
+        parser.feed(resp.text)
+        input_queue.task_done()
+        print('- (%d) Recipe %s processed...' % (input_queue.qsize(), recipe_url))
+        output_queue.put(parser)
 
 
-def main():
-    recipes = []
-    global base_url
-    base_url = "www.foodrepublic.com"
+def main(num_worker_threads=4):
+    recipe_urls = Queue()
+    recipes = Queue()
+    for i in range(num_worker_threads):
+        t = Thread(target=parse_recipe_by_url,
+                   kwargs={
+                       'input_queue': recipe_urls,
+                       'output_queue': recipes
+                   }
+        )
+        t.daemon = True
+        t.start()
 
     for recipe_url in get_recipe_list():
-        print('Recipe %s...' % recipe_url)
-        recipes.append(parse_recipe_by_url(recipe_url))
+        recipe_urls.put(recipe_url)
+        print('+ (%d) Recipe %s queued...' % (recipe_urls.qsize(), recipe_url))
+
+    recipe_urls.join()
+
+    while True:
+        try:
+            item = recipes.get_nowait()
+        except Empty:
+            break
+        print("Name:{0.name}\n"
+              "Servings:{0.servings}\n"
+              "Directions:{0.directions}\n"
+              "LevelofDifficulty:{0.difficulty}\n"
+              "PrepTime:{0.preptime}\n".format(item))
 
 
 main()
